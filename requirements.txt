@@ -1,0 +1,19 @@
+# NodeSeek 混合签到器依赖包
+# 基础HTTP库 (优先使用 curl_cffi 增强 Cloudflare 绕过)
+curl-cffi>=0.6.2
+requests>=2.31.0
+
+# Selenium 相关 (用于终极Fallback)
+selenium>=4.15.0
+undetected-chromedriver>=3.5.4
+webdriver-manager>=4.0.1
+
+# 时间处理
+python-dateutil>=2.8.2
+
+# 可选通知模块 (如果项目中包含)
+# notify  # 如果有自定义通知模块请取消注释
+
+# 开发调试工具 (可选)
+# beautifulsoup4>=4.12.2  # 用于HTML解析调试
+# Pillow>=10.0.0          # 用于截图处理
