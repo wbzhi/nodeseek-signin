@@ -512,13 +512,20 @@ class SeleniumSigner:
                 EC.presence_of_element_located((By.CSS_SELECTOR, ".head-info > div"))
             )
             
-            # 检查签到状态
-            head_info = self.driver.find_element(By.CSS_SELECTOR, ".head-info > div")
-            buttons = head_info.find_elements(By.TAG_NAME, "button")
-            
+            # 检查签到状态（先等页面加载完成，避免把 Loading 占位误判为已签到）
+            head_info = None
+            buttons = []
+            info_text = ""
+            for _ in range(20):
+                head_info = self.driver.find_element(By.CSS_SELECTOR, ".head-info > div")
+                buttons = head_info.find_elements(By.TAG_NAME, "button")
+                info_text = head_info.text.strip()
+                if buttons or (info_text and "Loading" not in info_text):
+                    break
+                time.sleep(1)
+
             if not buttons:
                 # 已签到
-                info_text = head_info.text.strip()
                 result = SigninResult(True, f"今日已签到: {info_text}", "selenium")
                 member_id = parse_member_id_from_cookie(cookie)
                 if member_id:
