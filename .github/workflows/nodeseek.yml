@@ -1,9 +1,6 @@
 name: NodeSeek 混合签到器
 
 on:
-  schedule:
-    # 备用定时: 每天北京时间上午09:00运行 (UTC 01:00)；主触发为外部 dispatch
-    - cron: '0 1 * * *'
   workflow_dispatch:
     inputs:
       enable_statistics:
@@ -81,7 +78,7 @@ jobs:
       run: |
         echo "🚀 开始执行 NodeSeek 混合签到..."
         echo "📊 统计功能: $ENABLE_STATISTICS"
-        echo "🤖 Selenium 模式: $ENABLE_SELENIUM" 
+        echo "🤖 Selenium 模式: $ENABLE_SELENIUM"
         echo "🎲 随机模式: $NS_RANDOM"
         echo "🌐 代理设置: ${{ vars.PROXY_URL && '已配置' || '未配置' }}"
         echo "📢 TG通知: ${{ secrets.TG_BOT_TOKEN && secrets.TG_CHAT_ID && '已配置' || '未配置' }}"
