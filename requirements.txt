@@ -1,12 +1,13 @@
 # NodeSeek 混合签到器依赖包
 # 基础HTTP库 (优先使用 curl_cffi 增强 Cloudflare 绕过)
-curl-cffi>=0.6.2
+# curl-cffi 需 >=0.11 才支持 chrome131/133 等新指纹
+curl-cffi>=0.11.0
 requests>=2.31.0
 
 # Selenium 相关 (用于终极Fallback)
+# 驱动改由 Selenium 自带的 Selenium Manager 自动匹配已安装的 Chrome，
+# 不再用 undetected-chromedriver / webdriver-manager（驱动版本常滞后导致 Chrome 起不来）
 selenium>=4.15.0
-undetected-chromedriver>=3.5.4
-webdriver-manager>=4.0.1
 
 # 时间处理
 python-dateutil>=2.8.2
