@@ -16,6 +16,7 @@ License: MIT
 """
 
 import os
+import sys
 import time
 import json
 import base64
@@ -44,7 +45,6 @@ try:
     from selenium.webdriver.support.ui import WebDriverWait
     from selenium.webdriver.support import expected_conditions as EC
     from selenium.webdriver.chrome.options import Options
-    import undetected_chromedriver as uc
     SELENIUM_AVAILABLE = True
     print("✅ Selenium 终极 Fallback 可用")
 except ImportError:
@@ -288,6 +288,16 @@ class StatisticsTracker:
             logging.warning(f"⚠️  用户信息查询失败: {str(e)}")
         return None
 
+# Cloudflare 绕过指纹：impersonate 与 UA 必须同代。
+# 旧版 chrome120 指纹太老、UA 还写着 Chrome/125，前后对不上容易被识别；
+# 每次重试换一套新指纹，同一份代码换个跑手 IP 也有机会绕过按 IP 的拦截。
+BROWSER_FINGERPRINTS = [
+    ("chrome131", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"),
+    ("chrome133", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"),
+    ("chrome120", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+]
+HTTP_SIGNIN_MAX_ATTEMPTS = 3
+
 class HTTPSigner:
     """HTTP 签到器 (轻量级方案)"""
     
@@ -310,7 +320,7 @@ class HTTPSigner:
             if hasattr(self.session, 'proxies'):
                 self.session.proxies.update(proxies)
                 
-    def get_headers(self, cookie: str) -> Dict[str, str]:
+    def get_headers(self, cookie: str, user_agent: str) -> Dict[str, str]:
         """获取请求头"""
         return {
             'Accept': 'application/json, text/plain, */*',
@@ -323,84 +333,99 @@ class HTTPSigner:
             'Host': 'www.nodeseek.com',
             'Origin': 'https://www.nodeseek.com',
             'Referer': 'https://www.nodeseek.com/board',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+            'User-Agent': user_agent,
             'X-Requested-With': 'XMLHttpRequest'
         }
-    
-    def signin(self, cookie: str, use_proxy: bool = False) -> SigninResult:
-        """HTTP 签到"""
-        try:
-            self.create_session(use_proxy)
-            headers = self.get_headers(cookie)
-            
-            # 随机延迟
-            delay = random.uniform(1, 3)
-            time.sleep(delay)
-            
-            # 构造签到请求
-            random_param = "true" if self.config['random_mode'] else "false"
-            url = f"https://www.nodeseek.com/api/attendance?random={random_param}"
-            
-            # 发送请求
-            if USE_CURL_CFFI:
-                try:
-                    response = self.session.post(
-                        url, headers=headers, json={}, 
-                        timeout=self.config['timeout'],
-                        impersonate="chrome120"
-                    )
-                except:
-                    response = self.session.post(url, headers=headers, json={}, timeout=self.config['timeout'])
-            else:
-                response = self.session.post(url, headers=headers, json={}, timeout=self.config['timeout'])
-            
-            # 解析响应
-            if response.status_code == 200:
-                try:
-                    result = response.json()
-                    if result.get('success'):
-                        gain = result.get('gain', 0)
-                        current = result.get('current', 0)
-                        message = f"签到成功！今天获得 {gain} 个鸡腿，总计 {current} 个鸡腿"
-                        method = "proxy" if use_proxy else "http"
-                        return SigninResult(True, message, method)
-                    else:
-                        return SigninResult(False, result.get('message', '签到失败'), "http")
-                except json.JSONDecodeError:
-                    return SigninResult(False, f"响应解析失败: {response.text[:100]}", "http")
-            
-            elif response.status_code == 500:
-                try:
-                    result = response.json()
-                    message = result.get('message', '')
-                    if any(keyword in message for keyword in ['已完成签到', '已签到', '重复操作']):
-                        return SigninResult(True, f"今日已签到: {message}", "http")
-                    else:
-                        return SigninResult(False, f"服务器错误: {message}", "http")
-                except:
-                    return SigninResult(False, f"服务器 500 错误", "http")
-            
-            elif response.status_code == 401:
-                # Cookie过期或无效
-                return SigninResult(False, "Cookie已过期，请手动更新", "http", cookie_expired=True)
-            
-            elif response.status_code == 403:
-                return SigninResult(False, "403 Forbidden - 可能被 Cloudflare 拦截", "http")
-                
-            elif response.status_code == 302:
-                # 重定向通常意味着未登录
-                return SigninResult(False, "302重定向 - Cookie可能已过期", "http", cookie_expired=True)
-            
-            else:
-                # 检查响应文本是否包含登录页面特征
-                response_text = response.text.lower()
-                if any(keyword in response_text for keyword in ['login', 'signin', 'sign in', '登录', '请登录']):
-                    return SigninResult(False, f"HTTP {response.status_code} - Cookie可能已过期", "http", cookie_expired=True)
+
+    def _parse_signin_response(self, response, use_proxy: bool):
+        """解析签到响应，返回 (结果, 是否值得重试)。"""
+        if response.status_code == 200:
+            try:
+                result = response.json()
+                if result.get('success'):
+                    gain = result.get('gain', 0)
+                    current = result.get('current', 0)
+                    message = f"签到成功！今天获得 {gain} 个鸡腿，总计 {current} 个鸡腿"
+                    method = "proxy" if use_proxy else "http"
+                    return SigninResult(True, message, method), False
                 else:
-                    return SigninResult(False, f"HTTP {response.status_code} 错误", "http")
-                
-        except Exception as e:
-            return SigninResult(False, f"HTTP 签到异常: {str(e)}", "http")
+                    return SigninResult(False, result.get('message', '签到失败'), "http"), False
+            except json.JSONDecodeError:
+                return SigninResult(False, f"响应解析失败: {response.text[:100]}", "http"), True
+
+        elif response.status_code == 500:
+            try:
+                result = response.json()
+                message = result.get('message', '')
+                if any(keyword in message for keyword in ['已完成签到', '已签到', '重复操作']):
+                    return SigninResult(True, f"今日已签到: {message}", "http"), False
+                else:
+                    return SigninResult(False, f"服务器错误: {message}", "http"), True
+            except:
+                return SigninResult(False, f"服务器 500 错误", "http"), True
+
+        elif response.status_code == 401:
+            # Cookie过期或无效，重试也没用
+            return SigninResult(False, "Cookie已过期，请手动更新", "http", cookie_expired=True), False
+
+        elif response.status_code == 403:
+            return SigninResult(False, "403 Forbidden - 可能被 Cloudflare 拦截", "http"), True
+
+        elif response.status_code == 302:
+            # 重定向通常意味着未登录
+            return SigninResult(False, "302重定向 - Cookie可能已过期", "http", cookie_expired=True), False
+
+        else:
+            # 检查响应文本是否包含登录页面特征
+            response_text = response.text.lower()
+            if any(keyword in response_text for keyword in ['login', 'signin', 'sign in', '登录', '请登录']):
+                return SigninResult(False, f"HTTP {response.status_code} - Cookie可能已过期", "http", cookie_expired=True), False
+            else:
+                return SigninResult(False, f"HTTP {response.status_code} 错误", "http"), True
+
+    def signin(self, cookie: str, use_proxy: bool = False) -> SigninResult:
+        """HTTP 签到：拦截类失败换指纹重试，不再一次就放弃"""
+        random_param = "true" if self.config['random_mode'] else "false"
+        url = f"https://www.nodeseek.com/api/attendance?random={random_param}"
+        last_result = SigninResult(False, "HTTP 签到失败", "http")
+
+        for attempt in range(1, HTTP_SIGNIN_MAX_ATTEMPTS + 1):
+            impersonate, user_agent = BROWSER_FINGERPRINTS[(attempt - 1) % len(BROWSER_FINGERPRINTS)]
+            try:
+                self.create_session(use_proxy)
+                headers = self.get_headers(cookie, user_agent)
+
+                # 随机延迟
+                delay = random.uniform(1, 3)
+                time.sleep(delay)
+
+                # 发送请求
+                if USE_CURL_CFFI:
+                    try:
+                        response = self.session.post(
+                            url, headers=headers, json={},
+                            timeout=self.config['timeout'],
+                            impersonate=impersonate
+                        )
+                    except Exception:
+                        # 指纹不受支持等情况：退回不指定指纹再试一次
+                        response = self.session.post(url, headers=headers, json={}, timeout=self.config['timeout'])
+                else:
+                    response = self.session.post(url, headers=headers, json={}, timeout=self.config['timeout'])
+
+                result, retryable = self._parse_signin_response(response, use_proxy)
+                if result.success or not retryable:
+                    return result
+                last_result = result
+                logging.warning(f"⚠️  HTTP 签到第 {attempt} 次失败: {result.message}，换指纹重试")
+            except Exception as e:
+                last_result = SigninResult(False, f"HTTP 签到异常: {str(e)}", "http")
+                logging.warning(f"⚠️  HTTP 签到第 {attempt} 次异常: {str(e)}，换指纹重试")
+
+            if attempt < HTTP_SIGNIN_MAX_ATTEMPTS:
+                time.sleep(15 * attempt)
+
+        return last_result
 
 class SeleniumSigner:
     """Selenium 签到器 (终极方案)"""
@@ -410,29 +435,29 @@ class SeleniumSigner:
         self.driver = None
         
     def create_driver(self):
-        """创建 WebDriver"""
+        """创建 WebDriver：用 Selenium 自带的驱动管理自动匹配已安装的 Chrome。
+        之前用的 undetected-chromedriver 自带一份驱动，常与工作流里装的 Chrome
+        稳定版对不上号，Chrome 一启动就死（chrome not reachable），改走这条路。"""
         if not SELENIUM_AVAILABLE:
             raise ImportError("Selenium 不可用")
-            
+
         chrome_options = Options()
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=1920,1080")
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-        
+
         if self.config['headless']:
             chrome_options.add_argument("--headless=new")
-            
+
         chrome_options.add_argument(
-            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         )
-        
-        try:
-            self.driver = uc.Chrome(options=chrome_options)
-        except:
-            # GitHub Actions fallback
-            self.driver = webdriver.Chrome(options=chrome_options)
+
+        # Selenium Manager 会自动下载与已安装 Chrome 版本匹配的 ChromeDriver，
+        # 不再经过 undetected-chromedriver 那份常滞后的驱动。
+        self.driver = webdriver.Chrome(options=chrome_options)
             
         # 隐藏自动化特征
         self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
@@ -695,7 +720,7 @@ class NodeSeekHybridSigner:
         accounts = self.load_accounts()
         if not accounts:
             logging.error("❌ 未找到任何账户配置")
-            return
+            return False
             
         logging.info(f"📋 发现 {len(accounts)} 个账户")
         
@@ -828,17 +853,21 @@ class NodeSeekHybridSigner:
             logging.warning("⚠️  TG推送失败，但签到任务已完成")
             
         logging.info("🏁 混合签到器执行完毕")
+        return success_count == len(results)
 
 def main():
-    """主函数"""
+    """主函数：全部账户签到成功返回 0，否则返回 1，让工作流如实显示失败"""
     try:
         signer = NodeSeekHybridSigner()
-        signer.run()
+        all_ok = signer.run()
+        sys.exit(0 if all_ok else 1)
     except KeyboardInterrupt:
         logging.info("⏹️  用户中断执行")
+        sys.exit(130)
     except Exception as e:
         logging.error(f"💥 执行异常: {str(e)}")
         logging.debug(traceback.format_exc())
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
